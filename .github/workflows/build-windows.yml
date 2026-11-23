@@ -50,6 +50,8 @@ env:
   SCCACHE_IDLE_TIMEOUT: '0'
   CCACHE_COMPILERCHECK: '%compiler% -v'
   WASM_TOOLS_VERSION: '1.243.0'
+  # Must be at least the Clang version that the runner's Visual Studio C++ standard library requires.
+  LLVM_VERSION: '22.1.8'
 
 jobs:
   check-upstream:
@@ -219,6 +221,8 @@ jobs:
           clang-cl --version
           python Meta/ladybird.py vcpkg --preset Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Ladybird's vcpkg checkout, not the one the Visual Studio environment points VCPKG_ROOT to.
+          $env:VCPKG_ROOT = Join-Path $PWD 'Build/vcpkg-release'
           # Same options as the build job, so that both resolve the same vcpkg features.
           cmake --preset Release -B Build/release -DLADYBIRD_BASELINE_CPU_TARGET=ON -DLADYBIRD_ENABLE_UPDATE_CHECK=OFF
           if ($LASTEXITCODE -ne 0) {
@@ -235,7 +239,7 @@ jobs:
           name: vcpkg-logs
           path: |
             C:/lb/Build/release/vcpkg-manifest-install.log
-            C:/lb/Build/vcpkg/buildtrees/*/*.log
+            C:/lb/Build/release/vcpkg_installed/vcpkg/blds/*/*.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -328,6 +332,8 @@ jobs:
           ccache -z
           python Meta/ladybird.py vcpkg --preset Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Ladybird's vcpkg checkout, not the one the Visual Studio environment points VCPKG_ROOT to.
+          $env:VCPKG_ROOT = Join-Path $PWD 'Build/vcpkg-release'
           $cmakeArgs = @('--preset', 'Release', '-B', 'Build/release',
             '-DLADYBIRD_BASELINE_CPU_TARGET=ON', '-DLADYBIRD_ENABLE_UPDATE_CHECK=OFF')
           if ($env:LB_VERSION) { $cmakeArgs += "-DLADYBIRD_VERSION=$env:LB_VERSION" }

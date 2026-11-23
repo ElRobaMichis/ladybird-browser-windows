@@ -27,12 +27,16 @@ runs:
       run: |
         choco install -y --no-progress ccache sccache pkgconfiglite
 
-        if ! where clang-cl > /dev/null 2>&1 && [ ! -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
-          # Same fallback version as upstream's CI, in sync with GitHub's Windows runner image.
-          choco install -y --no-progress llvm --version=20.1.8
-        fi
+        # A pinned LLVM, independent of the one in the runner image: the C++ standard library of the
+        # runner's Visual Studio rejects older Clang versions (STL1000), and upstream's CI uses Clang 22.
+        choco install -y --no-progress --force --allow-downgrade llvm --version="${LLVM_VERSION}"
         echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
-        "/c/Program Files/LLVM/bin/clang-cl.exe" --version
+        VERSION_LINE=$("/c/Program Files/LLVM/bin/clang-cl.exe" --version | head -1)
+        echo "${VERSION_LINE}"
+        if [[ "${VERSION_LINE}" != *"clang version ${LLVM_VERSION}"* ]]; then
+          echo "::error::Expected clang-cl ${LLVM_VERSION}, got: ${VERSION_LINE}"
+          exit 1
+        fi
 
     - name: Install the pinned Rust toolchain
       shell: bash
