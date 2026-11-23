@@ -1,0 +1,41 @@
+RequestServer: Trust a bundled CA file on Windows
+
+On Windows, RequestServer verifies TLS certificates with OpenSSL against the
+Windows certificate store (CURLSSLOPT_NATIVE_CA). Windows only adds most root
+certificates to that store the first time its own TLS stack needs them, so
+the store often lacks the root of a valid site, and Ladybird then fails with
+"SSL verification failed" (https://example.com, for one).
+
+With this patch, RequestServer also trusts the cacert.pem file next to its
+executable, if there is one and no --certificate was given. curl uses that
+file in addition to the Windows store. The package ships Mozilla's CA bundle
+there.
+
+diff --git a/Services/RequestServer/main.cpp b/Services/RequestServer/main.cpp
+index 5402ba09..c3f67664 100644
+--- a/Services/RequestServer/main.cpp
++++ b/Services/RequestServer/main.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <AK/ByteString.h>
+ #include <AK/Format.h>
++#include <AK/LexicalPath.h>
+ #include <AK/StringView.h>
+ #include <AK/Vector.h>
+ #include <LibCore/ArgsParser.h>
+@@ -93,6 +94,15 @@ ErrorOr<int> ladybird_main(Main::Arguments arguments)
+     // FIXME: Update RequestServer to support multiple custom root certificates.
+     if (!certificates.is_empty())
+         RequestServer::set_default_certificate_path(certificates.first());
++#ifdef AK_OS_WINDOWS
++    // Windows installs most trusted root certificates only when its own TLS stack first needs them, so the native store
++    // that curl reads can lack the root of a valid site. Trust the Mozilla CA bundle next to this executable as well.
++    else if (auto executable_path = Core::System::current_executable_path(); !executable_path.is_error()) {
++        auto bundle_path = LexicalPath::join(LexicalPath::dirname(executable_path.release_value()), "cacert.pem"sv).string();
++        if (FileSystem::exists(bundle_path))
++            RequestServer::set_default_certificate_path(move(bundle_path));
++    }
++#endif
+ 
+     if (!resource_map_path.is_empty()) {
+         auto map = RequestServer::ResourceSubstitutionMap::load_from_file(resource_map_path);

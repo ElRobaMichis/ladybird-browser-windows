@@ -4,7 +4,7 @@
 [![Latest release](https://img.shields.io/github/v/release/ElRobaMichis/ladybird-browser-windows?label=download)](https://github.com/ElRobaMichis/ladybird-browser-windows/releases/latest)
 
 Unofficial, automated Windows x64 builds of the [Ladybird](https://ladybird.org) web browser, compiled from the
-unmodified upstream source code with GitHub Actions.
+upstream source code with GitHub Actions.
 
 The official Ladybird alpha is available for macOS and Linux only. Ladybird's source code already contains an
 experimental native Windows port, and this repository builds it, so you can try Ladybird on Windows 10 and 11 without
@@ -46,7 +46,8 @@ Everything happens in public, in [`.github/workflows/build-windows.yml`](.github
 
 1. The workflow checks [LadybirdBrowser/ladybird](https://github.com/LadybirdBrowser/ladybird) for a new release,
    or for new commits on `master`.
-2. It checks out that exact upstream commit, **without any changes to the source code**.
+2. It checks out that exact upstream commit and applies the small Windows fixes in [`patches/`](patches). Each patch
+   describes what it changes and why. There are no other changes to the source code.
 3. It builds it with the same toolchain as Ladybird's own Windows CI: clang-cl, the MSVC libraries, vcpkg for the
    third-party libraries, and the Qt user interface.
 4. [`package-windows.ps1`](.github/scripts/package-windows.ps1) packages the browser with the libraries, Qt plugins
@@ -55,6 +56,13 @@ Everything happens in public, in [`.github/workflows/build-windows.yml`](.github
 
 The only build options that differ from a default Ladybird build are a portable CPU baseline and a disabled update
 check. The update check would point to official releases, which have no Windows version.
+
+The package also differs from a plain build in two ways:
+
+- It includes Mozilla's list of trusted root certificates (`bin\cacert.pem`, from
+  [curl.se](https://curl.se/docs/caextract.html)). Ladybird trusts it in addition to the Windows certificate store,
+  which often lacks root certificates that Windows only installs on first use.
+- Its programs are marked as Windows GUI applications, so the browser runs without a console window.
 
 ## Building it yourself
 

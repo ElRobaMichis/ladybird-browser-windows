@@ -27,7 +27,7 @@ on:
         type: string
         default: 'master'
       force:
-        description: 'Build even if this commit or version was already published'
+        description: 'Build even if this commit or version was already published (replaces the files of its release)'
         type: boolean
         default: false
 
@@ -131,8 +131,7 @@ jobs:
             SHOULD_BUILD=false
           fi
           if [[ "${FORCE}" == "true" ]] && has_release "${TAG}"; then
-            echo "::error::Release ${TAG} already exists. Delete it first to rebuild it."
-            exit 1
+            echo "Release ${TAG} already exists; the rebuild will replace its files."
           fi
 
           echo "Building ${KIND} ${VERSION:-from ${REF}} at ${SHA} as ${TAG}"
@@ -294,6 +293,17 @@ jobs:
           git checkout --detach FETCH_HEAD
           git log -1 --oneline
 
+      # Small Windows fixes that upstream does not have yet. Each patch explains what it changes and why.
+      # A patch that no longer applies fails the build instead of being skipped.
+      - name: Apply the patches in patches/
+        run: |
+          shopt -s nullglob
+          for patch in patches/*.patch; do
+            echo "Applying ${patch}"
+            git -C "${LB}" apply --verbose "$(cygpath -m "${PWD}/${patch}")"
+          done
+          git -C "${LB}" status --short
+
       - name: Restore the vcpkg binary cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -362,6 +372,22 @@ jobs:
             ${{ env.SCCACHE_DIR }}
           key: compilers-windows-x64-release-${{ env.UPSTREAM_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # Mozilla's root certificates, as extracted and published by the curl project. The patched RequestServer
+      # trusts them in addition to the Windows certificate store (see patches/).
+      - name: Download the Mozilla CA bundle
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4; do
+            curl --fail --silent --show-error --location --output "${RUNNER_TEMP}/cacert.pem" https://curl.se/ca/cacert.pem &&
+              curl --fail --silent --show-error --location --output "${RUNNER_TEMP}/cacert.pem.sha256" https://curl.se/ca/cacert.pem.sha256 &&
+              break
+            [ "${attempt}" -eq 4 ] && { echo "::error::Could not download the CA bundle"; exit 1; }
+            sleep $((attempt * 10))
+          done
+          cd "${RUNNER_TEMP}"
+          sha256sum --check cacert.pem.sha256
+          grep -m1 '^## Certificate data from Mozilla as of' cacert.pem
+
       - name: Package
         shell: pwsh
         run: >-
@@ -369,6 +395,7 @@ jobs:
           -BuildDir C:/lb/Build/release -SourceDir C:/lb
           -OutDir "$env:RUNNER_TEMP" -Name "$env:PACKAGE"
           -Version "$env:LB_VERSION" -UpstreamSha "$env:UPSTREAM_SHA"
+          -CaBundle "$env:RUNNER_TEMP/cacert.pem"
           -Repository "${{ github.repository }}"
 
       - name: Upload the package as an artifact
@@ -415,6 +442,7 @@ jobs:
           - Built by: https://github.com/${REPO} on ${BUILD_DATE}
           - Platform: Windows 10/11 x86_64
           - Toolchain: clang-cl + MSVC, vcpkg, Qt UI (upstream's experimental native Windows port)
+          - Changes to the upstream source: the Windows fixes in [\`patches/\`](https://github.com/${REPO}/tree/${GITHUB_SHA}/patches)
 
           **Install:** download \`${PACKAGE}.zip\`, extract it anywhere and run \`bin\Ladybird.exe\`.
 
@@ -427,9 +455,15 @@ jobs:
           > Initiative. Ladybird does not support Windows yet: expect crashes and missing features, and please report
           > Windows-specific problems here, not to the Ladybird project. This build does not check for updates.
           EOF
-          gh release create "${RELEASE_TAG}" "${FLAGS[@]}" \
-            --repo "${REPO}" \
-            --title "${TITLE}" \
-            --notes-file "${RUNNER_TEMP}/notes.md" \
-            "${RUNNER_TEMP}/${PACKAGE}.zip" \
-            "${RUNNER_TEMP}/SHA256SUMS.txt"
+          ASSETS=("${RUNNER_TEMP}/${PACKAGE}.zip" "${RUNNER_TEMP}/SHA256SUMS.txt")
+          if gh release view "${RELEASE_TAG}" --repo "${REPO}" > /dev/null 2>&1; then
+            # A forced rebuild replaces the files and notes of the existing release.
+            gh release upload "${RELEASE_TAG}" --repo "${REPO}" --clobber "${ASSETS[@]}"
+            gh release edit "${RELEASE_TAG}" --repo "${REPO}" --title "${TITLE}" --notes-file "${RUNNER_TEMP}/notes.md"
+          else
+            gh release create "${RELEASE_TAG}" "${FLAGS[@]}" \
+              --repo "${REPO}" \
+              --title "${TITLE}" \
+              --notes-file "${RUNNER_TEMP}/notes.md" \
+              "${ASSETS[@]}"
+          fi

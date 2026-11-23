@@ -1,0 +1,2 @@
+# Patches must keep the LF line endings of the Ladybird source they apply to.
+*.patch -text

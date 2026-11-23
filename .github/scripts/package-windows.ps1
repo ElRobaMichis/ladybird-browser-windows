@@ -6,13 +6,17 @@
 #   - the DLLs vcpkg built (Qt, Skia, ICU, ...)
 #   - the Qt plugins (platforms\qwindows.dll, styles, image formats, ...)
 #   - the MSVC runtime, so it runs without the Visual C++ Redistributable
+#   - Mozilla's CA bundle (cacert.pem), which the patched RequestServer trusts next to the Windows store
 #   - the license of Ladybird and of every bundled third-party library (Qt and FFmpeg are LGPL)
+# It also marks every executable as a Windows GUI application, so that the browser and its helper
+# processes run without console windows.
 
 param(
     [Parameter(Mandatory)] [string] $BuildDir,
     [Parameter(Mandatory)] [string] $SourceDir,
     [Parameter(Mandatory)] [string] $OutDir,
     [Parameter(Mandatory)] [string] $Name,
+    [Parameter(Mandatory)] [string] $CaBundle,
     [string] $Version = '',
     [string] $UpstreamSha = '',
     [string] $Repository = ''
@@ -83,8 +87,29 @@ if ($env:VCToolsRedistDir) {
     Write-Warning 'VCToolsRedistDir is not set; the MSVC runtime is not bundled'
 }
 
-# 6. Refuse to publish a package that cannot start.
-$required = 'Ladybird.exe', 'WebContent.exe', 'RequestServer.exe', 'platforms\qwindows.dll'
+# 6. Mozilla's CA bundle, next to RequestServer.exe, where the patched RequestServer looks for it.
+Copy-Item $CaBundle (Join-Path $bin 'cacert.pem')
+
+# 7. No console windows. Upstream links the browser and its helpers as console programs, so the browser
+#    opens a console that closes it when closed. Marking them as GUI programs changes only the subsystem
+#    field of the PE header; upstream does the same for its other GUI targets (WIN32_EXECUTABLE with
+#    /ENTRY:mainCRTStartup), so the entry point stays main().
+function Get-PeSubsystem([string] $Path) {
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+    # PE signature (4 bytes), COFF header (20 bytes), then the Subsystem field at offset 68 of the optional header.
+    return [BitConverter]::ToUInt16($bytes, $peOffset + 4 + 20 + 68)
+}
+foreach ($exe in Get-ChildItem $bin -File -Filter '*.exe') {
+    & editbin /nologo /SUBSYSTEM:WINDOWS $exe.FullName
+    if ($LASTEXITCODE -ne 0) { throw "editbin failed on $($exe.Name) with exit code $LASTEXITCODE" }
+    $subsystem = Get-PeSubsystem $exe.FullName
+    if ($subsystem -ne 2) { throw "$($exe.Name) still has PE subsystem $subsystem, not 2 (Windows GUI)" }
+    Write-Host "$($exe.Name): Windows GUI subsystem"
+}
+
+# 8. Refuse to publish a package that cannot start.
+$required = 'Ladybird.exe', 'WebContent.exe', 'RequestServer.exe', 'platforms\qwindows.dll', 'cacert.pem'
 $missing = $required | Where-Object { -not (Test-Path (Join-Path $bin $_)) }
 if ($missing) {
     Write-Host 'Package contents:'
@@ -92,7 +117,7 @@ if ($missing) {
     throw "Missing from the package: $($missing -join ', ')"
 }
 
-# 7. Licenses: Ladybird's own, and the copyright file vcpkg installs for each library it built.
+# 9. Licenses: Ladybird's own, and the copyright file vcpkg installs for each library it built.
 $licenses = Join-Path $staging 'licenses'
 New-Item -ItemType Directory -Force $licenses | Out-Null
 Copy-Item (Join-Path $SourceDir 'LICENSE') (Join-Path $licenses 'Ladybird.txt')
@@ -115,7 +140,14 @@ them with your own builds. Their source code is available from the upstream proj
 manifest pins, and on request from the publisher of this package: https://github.com/$Repository/issues
 
 Bundled libraries: $($ports -join ', ')
+
+bin\cacert.pem is Mozilla's list of trusted root certificates, as extracted by the curl project
+(https://curl.se/docs/caextract.html). It is licensed under the Mozilla Public License 2.0
+(https://www.mozilla.org/MPL/2.0/).
 "@ | Set-Content -Encoding utf8 (Join-Path $licenses 'README.txt')
+
+$caDate = (Select-String -Path $CaBundle -Pattern '^## Certificate data from Mozilla as of: (.+)$' |
+    Select-Object -First 1).Matches.Groups[1].Value
 
 $kind = if ($Version) { "Ladybird $Version alpha" } else { 'Ladybird nightly' }
 @"
@@ -126,6 +158,8 @@ Initiative. Ladybird does not support Windows yet; report Windows-specific probl
 
 Date:      $(Get-Date -AsUTC -Format 'yyyy-MM-dd')
 Commit:    https://github.com/LadybirdBrowser/ladybird/commit/$UpstreamSha
+Patches:   https://github.com/$Repository/tree/$(if ($env:GITHUB_SHA) { $env:GITHUB_SHA } else { 'main' })/patches
+CA bundle: Mozilla root certificates as of $caDate
 Built by:  https://github.com/$Repository
 
 Run bin\Ladybird.exe
@@ -134,7 +168,7 @@ Run bin\Ladybird.exe
 Write-Host 'Package contents (top level of bin\):'
 Get-ChildItem $bin | Select-Object Name, Length | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
 
-# 8. Zip it, with the versioned folder at the top.
+# 10. Zip it, with the versioned folder at the top.
 $zip = Join-Path $OutDir "$Name.zip"
 if (Test-Path $zip) { Remove-Item $zip }
 Push-Location $OutDir
