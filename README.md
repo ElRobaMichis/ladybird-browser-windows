@@ -54,6 +54,8 @@ Everything happens in public, in [`.github/workflows/build-windows.yml`](.github
    and runtime it needs, plus all license files.
 5. The package is published as a GitHub release with its checksum and attestation.
 
+The workflow runs every day. It builds a new upstream release as soon as one is published, and a nightly otherwise.
+
 The only build options that differ from a default Ladybird build are a portable CPU baseline and a disabled update
 check. The update check would point to official releases, which have no Windows version.
 

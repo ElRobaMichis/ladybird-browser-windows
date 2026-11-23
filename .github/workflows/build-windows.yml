@@ -54,6 +54,21 @@ env:
   LLVM_VERSION: '22.1.8'
 
 jobs:
+  # GitHub disables the schedule of a public repository after 60 days without activity, and the releases
+  # this workflow publishes do not count as activity. Enabling the workflow again through the API resets
+  # that timer, without making commits.
+  keep-alive:
+    name: Keep the schedule enabled
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Enable this workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: gh api --method PUT "repos/${REPO}/actions/workflows/build-windows.yml/enable"
+
   check-upstream:
     name: Decide what to build
     runs-on: ubuntu-latest
