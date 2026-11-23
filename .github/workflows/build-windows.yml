@@ -467,8 +467,9 @@ jobs:
 
           > [!WARNING]
           > This is **not an official Ladybird release** and is not made, endorsed or supported by the Ladybird Browser
-          > Initiative. Ladybird does not support Windows yet: expect crashes and missing features, and please report
-          > Windows-specific problems here, not to the Ladybird project. This build does not check for updates.
+          > Initiative. Ladybird does not support Windows yet: expect crashes and missing features. This repository only
+          > packages Ladybird; see [Reporting problems](${GITHUB_SERVER_URL}/${REPO}#reporting-problems) for where to
+          > report what. This build does not check for updates.
           EOF
           ASSETS=("${RUNNER_TEMP}/${PACKAGE}.zip" "${RUNNER_TEMP}/SHA256SUMS.txt")
           if gh release view "${RELEASE_TAG}" --repo "${REPO}" > /dev/null 2>&1; then

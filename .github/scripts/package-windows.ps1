@@ -159,7 +159,9 @@ $kind = if ($Version) { "Ladybird $Version alpha" } else { 'Ladybird nightly' }
 $kind for Windows x86_64 - UNOFFICIAL BUILD
 
 This is not an official Ladybird release. It is not made, endorsed or supported by the Ladybird Browser
-Initiative. Ladybird does not support Windows yet; report Windows-specific problems to the publisher below.
+Initiative. Ladybird does not support Windows yet, so expect crashes and missing features. The publisher below
+only builds and packages Ladybird: report problems with the package there, and bugs in the browser to the
+Ladybird project (https://github.com/LadybirdBrowser/ladybird/blob/master/CONTRIBUTING.md).
 
 Date:      $(Get-Date -AsUTC -Format 'yyyy-MM-dd')
 Commit:    https://github.com/LadybirdBrowser/ladybird/commit/$UpstreamSha

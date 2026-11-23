@@ -13,7 +13,6 @@ setting up a build environment.
 > [!WARNING]
 > **These are not official Ladybird releases.** They are not made, endorsed or supported by the Ladybird Browser
 > Initiative. Ladybird does not support Windows yet, so expect crashes and missing features.
-> Please report Windows-specific problems [here](../../issues), not to the Ladybird project.
 
 ## Download
 
@@ -67,6 +66,17 @@ The package also differs from a plain build in three ways:
 - Its programs are marked as Windows GUI applications, so the browser runs without a console window.
 - `Ladybird.exe` has Ladybird's icon embedded ([`set-exe-icon.ps1`](.github/scripts/set-exe-icon.ps1)), so pinned
   taskbar items and Task Manager show it.
+
+## Reporting problems
+
+This repository only builds and packages Ladybird. It does not develop the browser, so it does not fix bugs in it or
+add features to it.
+
+- **Problems with the package**, such as a download that does not verify, a missing file, or a browser that does not
+  start at all: open an [issue here](../../issues).
+- **Bugs in the browser and feature requests** belong to the Ladybird project. Before reporting one, read its
+  [contributing guidelines](https://github.com/LadybirdBrowser/ladybird/blob/master/CONTRIBUTING.md), check that it
+  also happens in an official build or a build of your own, and say that you found it in this unofficial package.
 
 ## Building it yourself
 
