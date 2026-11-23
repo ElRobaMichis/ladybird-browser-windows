@@ -57,12 +57,14 @@ Everything happens in public, in [`.github/workflows/build-windows.yml`](.github
 The only build options that differ from a default Ladybird build are a portable CPU baseline and a disabled update
 check. The update check would point to official releases, which have no Windows version.
 
-The package also differs from a plain build in two ways:
+The package also differs from a plain build in three ways:
 
 - It includes Mozilla's list of trusted root certificates (`bin\cacert.pem`, from
   [curl.se](https://curl.se/docs/caextract.html)). Ladybird trusts it in addition to the Windows certificate store,
   which often lacks root certificates that Windows only installs on first use.
 - Its programs are marked as Windows GUI applications, so the browser runs without a console window.
+- `Ladybird.exe` has Ladybird's icon embedded ([`set-exe-icon.ps1`](.github/scripts/set-exe-icon.ps1)), so pinned
+  taskbar items and Task Manager show it.
 
 ## Building it yourself
 

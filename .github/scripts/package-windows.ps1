@@ -9,7 +9,7 @@
 #   - Mozilla's CA bundle (cacert.pem), which the patched RequestServer trusts next to the Windows store
 #   - the license of Ladybird and of every bundled third-party library (Qt and FFmpeg are LGPL)
 # It also marks every executable as a Windows GUI application, so that the browser and its helper
-# processes run without console windows.
+# processes run without console windows, and embeds Ladybird's icon in Ladybird.exe.
 
 param(
     [Parameter(Mandatory)] [string] $BuildDir,
@@ -107,6 +107,11 @@ foreach ($exe in Get-ChildItem $bin -File -Filter '*.exe') {
     if ($subsystem -ne 2) { throw "$($exe.Name) still has PE subsystem $subsystem, not 2 (Windows GUI)" }
     Write-Host "$($exe.Name): Windows GUI subsystem"
 }
+
+#    And an icon in Ladybird.exe, for pinned taskbar items, Explorer and Task Manager: upstream has none for
+#    Windows. It is the same image the Qt UI gives its windows at run time.
+& (Join-Path $PSScriptRoot 'set-exe-icon.ps1') -Exe (Join-Path $bin 'Ladybird.exe') `
+    -Png (Join-Path $SourceDir 'UI/Icons/ladybird.png')
 
 # 8. Refuse to publish a package that cannot start.
 $required = 'Ladybird.exe', 'WebContent.exe', 'RequestServer.exe', 'platforms\qwindows.dll', 'cacert.pem'
