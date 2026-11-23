@@ -1,0 +1,429 @@
+name: Windows Build
+
+# Unofficial builds of Ladybird for Windows x86_64 (clang-cl + MSVC + vcpkg). Two kinds:
+#   - release: an upstream release tag (e.g. the 2026.47.7 alpha), published as "<version>-windows"
+#   - nightly: the latest upstream master, published as a pre-release "nightly-<date>-<sha>"
+# The scheduled run builds a new upstream release first if there is one, and a nightly otherwise.
+#
+# The native Windows build is experimental upstream. This workflow mirrors the setup of the
+# upstream Windows CI job (.github/actions/setup and .github/actions/build in LadybirdBrowser/ladybird)
+# and packages the build tree as a portable .zip.
+#
+# GitHub-hosted runners have 4 vCPUs and a 6 hour limit per job, so the work is split in two jobs
+# (third-party dependencies, then the browser), and every cache is saved even when a step times out.
+# A cold first run may need a second run to finish; later runs reuse the caches.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream release to build, such as 2026.47.7 (empty: nightly from the ref below)'
+        type: string
+        default: ''
+      ref:
+        description: 'Upstream branch or commit for a nightly (default: master)'
+        type: string
+        default: 'master'
+      force:
+        description: 'Build even if this commit or version was already published'
+        type: boolean
+        default: false
+
+# Least privilege: only the job that publishes the release can write, and attest what it publishes.
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build
+  cancel-in-progress: false
+
+env:
+  # Short path: vcpkg (Qt in particular) breaks on long paths under the default workspace.
+  LADYBIRD_SOURCE_DIR: 'C:\lb'
+  LB: 'C:/lb'
+  VCPKG_BINARY_CACHE: 'C:/lb/Build/caches/vcpkg-binary-cache'
+  CCACHE_DIR: 'C:/lb-cache/ccache'
+  SCCACHE_DIR: 'C:/lb-cache/sccache'
+  SCCACHE_CACHE_SIZE: '2G'
+  SCCACHE_IDLE_TIMEOUT: '0'
+  CCACHE_COMPILERCHECK: '%compiler% -v'
+  WASM_TOOLS_VERSION: '1.243.0'
+
+jobs:
+  check-upstream:
+    name: Decide what to build
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.decide.outputs.should_build }}
+      kind: ${{ steps.decide.outputs.kind }}
+      version: ${{ steps.decide.outputs.version }}
+      sha: ${{ steps.decide.outputs.sha }}
+      short_sha: ${{ steps.decide.outputs.short_sha }}
+      date: ${{ steps.decide.outputs.date }}
+      tag: ${{ steps.decide.outputs.tag }}
+      package: ${{ steps.decide.outputs.package }}
+    steps:
+      - name: Decide what to build
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version || '' }}
+          INPUT_REF: ${{ inputs.ref || 'master' }}
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          UPSTREAM=LadybirdBrowser/ladybird
+          has_release() { gh release view "$1" --repo "${REPO}" > /dev/null 2>&1; }
+
+          KIND=nightly
+          VERSION=""
+          REF="${INPUT_REF}"
+          if [[ -n "${INPUT_VERSION}" ]]; then
+            KIND=release
+            VERSION="${INPUT_VERSION}"
+          elif [[ "${EVENT}" == "schedule" ]]; then
+            # A new upstream release without a Windows build takes priority over the nightly.
+            LATEST=$(gh api "repos/${UPSTREAM}/releases/latest" --jq '.tag_name' 2> /dev/null || true)
+            if [[ -n "${LATEST}" ]] && ! has_release "${LATEST}-windows"; then
+              echo "Upstream release ${LATEST} has no Windows build yet."
+              KIND=release
+              VERSION="${LATEST}"
+            fi
+          fi
+
+          if [[ "${KIND}" == "release" ]]; then
+            if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::The version must look like 2026.47.7, not '${VERSION}'"
+              exit 1
+            fi
+            REF="${VERSION}"
+          fi
+
+          # The commits endpoint resolves branches, tags and hashes alike.
+          SHA=$(gh api "repos/${UPSTREAM}/commits/${REF}" --jq '.sha')
+          SHORT_SHA="${SHA:0:7}"
+          DATE=$(date -u +%Y%m%d)
+
+          if [[ "${KIND}" == "release" ]]; then
+            TAG="${VERSION}-windows"
+            PACKAGE="ladybird-${VERSION}-windows-x86_64-unofficial"
+            ALREADY_BUILT=false
+            has_release "${TAG}" && ALREADY_BUILT=true
+          else
+            TAG="nightly-${DATE}-${SHORT_SHA}"
+            PACKAGE="ladybird-nightly-windows-x86_64-${DATE}-${SHORT_SHA}"
+            LAST_NIGHTLY=$(gh release list --repo "${REPO}" --limit 50 --json tagName \
+              --jq '[.[].tagName | select(startswith("nightly-"))][0] // ""' || true)
+            echo "Latest nightly: ${LAST_NIGHTLY:-none}"
+            ALREADY_BUILT=false
+            [[ -n "${LAST_NIGHTLY}" && "${LAST_NIGHTLY##*-}" == "${SHORT_SHA}" ]] && ALREADY_BUILT=true
+          fi
+
+          SHOULD_BUILD=true
+          if [[ "${ALREADY_BUILT}" == "true" && "${FORCE}" != "true" ]]; then
+            echo "Already published ${TAG}. Skipping."
+            SHOULD_BUILD=false
+          fi
+          if [[ "${FORCE}" == "true" ]] && has_release "${TAG}"; then
+            echo "::error::Release ${TAG} already exists. Delete it first to rebuild it."
+            exit 1
+          fi
+
+          echo "Building ${KIND} ${VERSION:-from ${REF}} at ${SHA} as ${TAG}"
+          {
+            echo "should_build=${SHOULD_BUILD}"
+            echo "kind=${KIND}"
+            echo "version=${VERSION}"
+            echo "sha=${SHA}"
+            echo "short_sha=${SHORT_SHA}"
+            echo "date=${DATE}"
+            echo "tag=${TAG}"
+            echo "package=${PACKAGE}"
+          } >> "$GITHUB_OUTPUT"
+
+  # Builds the vcpkg dependencies (Qt, Skia, ICU, ANGLE, ...) into the binary cache.
+  # Skipped when the cache already matches this commit's vcpkg manifest.
+  deps:
+    name: Build dependencies (vcpkg)
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 360
+    outputs:
+      vcpkg_key: ${{ steps.key.outputs.key }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout this repository (for the local actions)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout Ladybird
+        run: |
+          git config --global core.longpaths true
+          git config --global core.autocrlf false
+          git init "${LB}"
+          cd "${LB}"
+          git remote add origin https://github.com/LadybirdBrowser/ladybird.git
+          git fetch --depth 1 origin "${{ needs.check-upstream.outputs.sha }}"
+          git checkout --detach FETCH_HEAD
+          git log -1 --oneline
+
+      - name: Compute the vcpkg cache key
+        id: key
+        working-directory: C:\lb
+        run: |
+          # Object ids of the manifest, its configuration and the triplets/overlay ports.
+          HASH=$(git rev-parse HEAD:vcpkg.json HEAD:vcpkg-configuration.json HEAD:Meta/CMake/vcpkg | sha256sum | cut -c1-16)
+          PREFIX="vcpkg-windows-x64-release-${ImageOS}"
+          echo "prefix=${PREFIX}" >> "$GITHUB_OUTPUT"
+          echo "key=${PREFIX}-${HASH}" >> "$GITHUB_OUTPUT"
+
+      # An exact hit means a previous run already built every dependency of this manifest.
+      # Otherwise start from the closest partial or older cache: vcpkg only rebuilds what changed.
+      - name: Restore the vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: ${{ steps.key.outputs.key }}
+          restore-keys: |
+            ${{ steps.key.outputs.key }}-
+            ${{ steps.key.outputs.prefix }}-
+
+      - name: Set up the toolchain
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: ./.github/actions/setup-windows-toolchain
+
+      - name: Set up the Visual Studio environment
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Prefer the standalone LLVM over the one bundled with Visual Studio
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+
+      - name: Configure (builds the vcpkg dependencies)
+        id: configure
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        working-directory: C:\lb
+        timeout-minutes: 320
+        shell: pwsh
+        run: |
+          clang-cl --version
+          python Meta/ladybird.py vcpkg --preset Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Same options as the build job, so that both resolve the same vcpkg features.
+          cmake --preset Release -B Build/release -DLADYBIRD_BASELINE_CPU_TARGET=ON -DLADYBIRD_ENABLE_UPDATE_CHECK=OFF
+          if ($LASTEXITCODE -ne 0) {
+            Get-ChildItem -Recurse -Filter '*.log' Build/release -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like 'vcpkg-manifest-install*' } |
+              ForEach-Object { Get-Content $_.FullName -Tail 200 }
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload vcpkg logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vcpkg-logs
+          path: |
+            C:/lb/Build/release/vcpkg-manifest-install.log
+            C:/lb/Build/vcpkg/buildtrees/*/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Save the complete vcpkg binary cache
+        if: steps.configure.outcome == 'success'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: ${{ steps.key.outputs.key }}
+
+      # Saved after a failure or a timeout too, so that the next run resumes where this one stopped.
+      - name: Save the partial vcpkg binary cache
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true' && steps.configure.outcome != 'success' && steps.configure.outcome != 'skipped'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: ${{ steps.key.outputs.key }}-partial-${{ github.run_id }}-${{ github.run_attempt }}
+
+  build:
+    name: Build Ladybird (Windows x86_64)
+    needs: [check-upstream, deps]
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 360
+    permissions:
+      contents: write      # create the GitHub release
+      id-token: write      # sign the build provenance attestation
+      attestations: write  # store the attestation
+    defaults:
+      run:
+        shell: bash
+    env:
+      KIND: ${{ needs.check-upstream.outputs.kind }}
+      LB_VERSION: ${{ needs.check-upstream.outputs.version }}
+      UPSTREAM_SHA: ${{ needs.check-upstream.outputs.sha }}
+      SHORT_SHA: ${{ needs.check-upstream.outputs.short_sha }}
+      BUILD_DATE: ${{ needs.check-upstream.outputs.date }}
+      RELEASE_TAG: ${{ needs.check-upstream.outputs.tag }}
+      PACKAGE: ${{ needs.check-upstream.outputs.package }}
+    steps:
+      - name: Checkout this repository (for the local actions)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Checkout Ladybird
+        run: |
+          git config --global core.longpaths true
+          git config --global core.autocrlf false
+          git init "${LB}"
+          cd "${LB}"
+          git remote add origin https://github.com/LadybirdBrowser/ladybird.git
+          git fetch --depth 1 origin "${UPSTREAM_SHA}"
+          git checkout --detach FETCH_HEAD
+          git log -1 --oneline
+
+      - name: Restore the vcpkg binary cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: ${{ needs.deps.outputs.vcpkg_key }}
+          restore-keys: ${{ needs.deps.outputs.vcpkg_key }}-
+
+      - name: Restore the compiler caches
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.CCACHE_DIR }}
+            ${{ env.SCCACHE_DIR }}
+          key: compilers-windows-x64-release-${{ env.UPSTREAM_SHA }}
+          restore-keys: compilers-windows-x64-release-
+
+      - name: Set up the toolchain
+        uses: ./.github/actions/setup-windows-toolchain
+
+      - name: Set up the Visual Studio environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: x64
+
+      - name: Prefer the standalone LLVM over the one bundled with Visual Studio
+        run: echo "C:\Program Files\LLVM\bin" >> "$GITHUB_PATH"
+
+      # The update check is off: it would point Windows users to official releases that have no Windows build.
+      - name: Configure
+        working-directory: C:\lb
+        timeout-minutes: 120
+        shell: pwsh
+        run: |
+          clang-cl --version
+          ccache -M 3G
+          ccache -z
+          python Meta/ladybird.py vcpkg --preset Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $cmakeArgs = @('--preset', 'Release', '-B', 'Build/release',
+            '-DLADYBIRD_BASELINE_CPU_TARGET=ON', '-DLADYBIRD_ENABLE_UPDATE_CHECK=OFF')
+          if ($env:LB_VERSION) { $cmakeArgs += "-DLADYBIRD_VERSION=$env:LB_VERSION" }
+          cmake @cmakeArgs
+          exit $LASTEXITCODE
+
+      # Only the browser and its helper processes; the test suites are not needed for the package.
+      - name: Build
+        working-directory: C:\lb
+        timeout-minutes: 300
+        shell: pwsh
+        run: |
+          cmake --build Build/release --target ladybird
+          exit $LASTEXITCODE
+
+      - name: Compiler cache stats
+        if: always()
+        run: ccache -s || true
+
+      - name: Save the compiler caches
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.CCACHE_DIR }}
+            ${{ env.SCCACHE_DIR }}
+          key: compilers-windows-x64-release-${{ env.UPSTREAM_SHA }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Package
+        shell: pwsh
+        run: >-
+          ./.github/scripts/package-windows.ps1
+          -BuildDir C:/lb/Build/release -SourceDir C:/lb
+          -OutDir "$env:RUNNER_TEMP" -Name "$env:PACKAGE"
+          -Version "$env:LB_VERSION" -UpstreamSha "$env:UPSTREAM_SHA"
+          -Repository "${{ github.repository }}"
+
+      - name: Upload the package as an artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.PACKAGE }}
+          path: ${{ runner.temp }}/${{ env.PACKAGE }}.zip
+          compression-level: 0
+          retention-days: 7
+
+      - name: Compute checksums
+        working-directory: ${{ runner.temp }}
+        run: |
+          sha256sum "${PACKAGE}.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # Signed record of which workflow run, commit of this repository and inputs produced the package.
+      # Verify a download with: gh attestation verify <file>.zip --repo <this repository>
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/${{ env.PACKAGE }}.zip
+
+      # Releases of upstream versions are marked as the latest release; nightlies are pre-releases.
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          COMMIT_LINK="[\`${SHORT_SHA}\`](https://github.com/LadybirdBrowser/ladybird/commit/${UPSTREAM_SHA})"
+          if [[ "${KIND}" == "release" ]]; then
+            TITLE="Ladybird ${LB_VERSION} alpha for Windows (unofficial)"
+            HEADLINE="**Unofficial Windows build of the Ladybird ${LB_VERSION} alpha** ([upstream release](https://github.com/LadybirdBrowser/ladybird/releases/tag/${LB_VERSION}), commit ${COMMIT_LINK})"
+            FLAGS=(--latest)
+          else
+            TITLE="Nightly ${BUILD_DATE} (${SHORT_SHA})"
+            HEADLINE="**Unofficial nightly Windows build of Ladybird** from upstream master, commit ${COMMIT_LINK}"
+            FLAGS=(--prerelease)
+          fi
+          cat > "${RUNNER_TEMP}/notes.md" <<EOF
+          ${HEADLINE}
+
+          - Built by: https://github.com/${REPO} on ${BUILD_DATE}
+          - Platform: Windows 10/11 x86_64
+          - Toolchain: clang-cl + MSVC, vcpkg, Qt UI (upstream's experimental native Windows port)
+
+          **Install:** download \`${PACKAGE}.zip\`, extract it anywhere and run \`bin\Ladybird.exe\`.
+
+          **Verify:** this build was produced by [workflow run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}).
+          Check the download against \`SHA256SUMS.txt\` or its signed provenance:
+          \`gh attestation verify ${PACKAGE}.zip --repo ${REPO}\`
+
+          > [!WARNING]
+          > This is **not an official Ladybird release** and is not made, endorsed or supported by the Ladybird Browser
+          > Initiative. Ladybird does not support Windows yet: expect crashes and missing features, and please report
+          > Windows-specific problems here, not to the Ladybird project. This build does not check for updates.
+          EOF
+          gh release create "${RELEASE_TAG}" "${FLAGS[@]}" \
+            --repo "${REPO}" \
+            --title "${TITLE}" \
+            --notes-file "${RUNNER_TEMP}/notes.md" \
+            "${RUNNER_TEMP}/${PACKAGE}.zip" \
+            "${RUNNER_TEMP}/SHA256SUMS.txt"

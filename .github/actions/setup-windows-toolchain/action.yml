@@ -1,0 +1,58 @@
+name: 'Set up the Windows toolchain'
+description: 'Installs what the upstream Windows CI job installs: Python env, LLVM/clang-cl, ccache, sccache, pkg-config, Rust and wasm-tools'
+
+inputs:
+  source_dir:
+    description: 'Ladybird checkout'
+    required: false
+    default: 'C:\lb'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+      with:
+        python-version: '3.12'
+
+    - name: Set up the Ladybird Python environment
+      shell: bash
+      working-directory: ${{ inputs.source_dir }}
+      run: |
+        python_bin=$(python Meta/Utils/python_environment.py --print-bin | tr -d '\r')
+        echo "${python_bin}" >> "$GITHUB_PATH"
+        echo "Python environment: ${python_bin}"
+
+    - name: Install build tools
+      shell: bash
+      run: |
+        choco install -y --no-progress ccache sccache pkgconfiglite
+
+        if ! where clang-cl > /dev/null 2>&1 && [ ! -x "/c/Program Files/LLVM/bin/clang-cl.exe" ]; then
+          # Same fallback version as upstream's CI, in sync with GitHub's Windows runner image.
+          choco install -y --no-progress llvm --version=20.1.8
+        fi
+        echo "C:\\Program Files\\LLVM\\bin" >> "$GITHUB_PATH"
+        "/c/Program Files/LLVM/bin/clang-cl.exe" --version
+
+    - name: Install the pinned Rust toolchain
+      shell: bash
+      working-directory: ${{ inputs.source_dir }}
+      run: |
+        rustup toolchain install
+        cargo --version
+        rustc --version
+
+    - name: Install wasm-tools
+      shell: bash
+      run: |
+        NAME="wasm-tools-${WASM_TOOLS_VERSION}-x86_64-windows"
+        URL="https://github.com/bytecodealliance/wasm-tools/releases/download/v${WASM_TOOLS_VERSION}/${NAME}.zip"
+        DEST="${RUNNER_TEMP}/wasm-tools"
+        for attempt in 1 2 3 4; do
+          curl --fail --location --output "${RUNNER_TEMP}/${NAME}.zip" "${URL}" && break
+          [ "${attempt}" -eq 4 ] && { echo "wasm-tools download failed" >&2; exit 1; }
+          sleep $((attempt * 10))
+        done
+        unzip -q "${RUNNER_TEMP}/${NAME}.zip" -d "${RUNNER_TEMP}"
+        mv "${RUNNER_TEMP}/${NAME}" "${DEST}"
+        echo "$(cygpath -w "${DEST}")" >> "$GITHUB_PATH"
